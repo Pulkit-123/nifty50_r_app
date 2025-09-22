@@ -7,7 +7,7 @@
 if (isTRUE(getOption("nifty50.autoinstall", TRUE))) {
   req_pkgs <- c(
     "shiny","bslib","quantmod","xts","dplyr","lubridate","plotly","TTR",
-    "memoise","shinycssloaders","scales","purrr","stringr","nser"
+    "memoise","shinycssloaders","scales","purrr","stringr","nser","DT"
   )
   to_install <- setdiff(req_pkgs, rownames(installed.packages()))
   if (length(to_install)) install.packages(to_install, repos = "https://cloud.r-project.org")
@@ -27,6 +27,7 @@ library(shinycssloaders)
 library(scales)
 library(purrr)
 library(stringr)
+library(DT)
 suppressPackageStartupMessages(try(library(nser), silent = TRUE))
 
 # --- Config -------------------------------------------------------------
@@ -52,13 +53,12 @@ nifty_map <- c(
   "Divi's Labs"="DIVISLAB.NS","Dr Reddy's"="DRREDDY.NS","Cipla"="CIPLA.NS","Grasim"="GRASIM.NS",
   "Tech Mahindra"="TECHM.NS","Eicher Motors"="EICHERMOT.NS","Hero MotoCorp"="HEROMOTOCO.NS",
   "Britannia"="BRITANNIA.NS","UPL"="UPL.NS","ONGC"="ONGC.NS","BPCL"="BPCL.NS",
-  "IndusInd Bank"="INDUSINDBK.NS","Bajaj Auto"="BAJAJ-AUTO.NS","Apollo Hospitals"="APOLLOHOSP.NS",
+  "IndusInd Bank"="INDUSINDBK.NS","Bajaj Auto"="Bajaj-AUTO.NS","Apollo Hospitals"="APOLLOHOSP.NS",
   "LTI Mindtree"="LTIM.NS","Shriram Finance"="SHRIRAMFIN.NS"
 )
 
 # --- Helpers: safe theme toggle ----------------------------------------
 theme_toggle_safe <- function() {
-  # Return a bslib theme toggle button if available, else NULL
   if (requireNamespace("bslib", quietly = TRUE)) {
     ns <- asNamespace("bslib")
     if (exists("theme_toggle", envir = ns, inherits = FALSE)) {
@@ -98,10 +98,7 @@ max_drawdown_pct <- function(px) {
 }
 
 fetch_nifty_fallback <- function(from, to) {
-  # If Yahoo fails for ^NSEI, try alternative (stub stays Yahoo for now).
-  tryCatch({
-    fetch_yahoo(NIFTY_YH, from, to)
-  }, error = function(e) NULL)
+  tryCatch({ fetch_yahoo(NIFTY_YH, from, to) }, error = function(e) NULL)
 }
 
 # --- README content -----------------------------------------------------
@@ -113,27 +110,16 @@ readme_md <- paste(
   "## Features",
   "- Interactive **candlestick** + volume (green up / red down), log-scale toggle, configurable SMAs.",
   "- **Real-time quote** badge (auto-refresh + manual refresh).",
-  "- **Stock vs NIFTY** comparison:",
-  "  - Dual-axis price lines (NIFTY left axis; stock on right, blue).",
-  "  - Optional **Normalize to % change** view with single % axis.",
-  "- **Risk metrics** (vs NIFTY): β, correlation, R², annualized vol, max drawdown, tracking error, information ratio.",
-  "- **Watchlist** small-multiples (normalize % toggle) with CSV export.",
-  "- **Alerts** for % move and/or target price (toast notifications).",
-  "- **Caching** (memoise) + **debounced inputs** for snappy UX.",
-  "- **Downloads**: stock history, comparison series, watchlist panel data.",
-  "- **Theming** with `bslib` (light/dark toggle when available).",
-  "",
-  "## Data & Limits",
-  "- Historical & quotes via Yahoo Finance; availability/adjustments can vary.",
-  "- Times shown in IST. Intraday history depth is limited by source.",
+  "- **Stock vs NIFTY** comparison: dual-axis price vs price, or normalized % view.",
+  "- **Risk metrics** (β, corr, R², vol, max DD, tracking error, info ratio).",
+  "- **Watchlist** small-multiples (normalize toggle) with CSV export.",
+  "- **Data Table** tab for last N days with OHLCV, Avg Price, OC% and CC% returns.",
+  "- **Alerts**, **caching**, **debounced inputs**, themed UI, and CSV downloads.",
   "",
   "## Run Locally",
   "```r",
   "shiny::runApp()",
   "```",
-  "",
-  "## License",
-  "MIT (for this app code). Data terms per their respective providers.",
   sep = "\n"
 )
 
@@ -150,7 +136,7 @@ ui <- fluidPage(
   pageTitle = "NIFTY 50 — Real-Time & Historical",
   titlePanel(tagList(
     "NIFTY 50 — Real-Time & Historical (quantmod + Yahoo, interactive)",
-    theme_toggle_safe()  # <- safe toggle (NULL on older bslib)
+    theme_toggle_safe()
   )),
   sidebarLayout(
     sidebarPanel(
@@ -239,6 +225,16 @@ ui <- fluidPage(
           downloadButton("dl_watchlist", "Download CSV (Watchlist panel)")
         ),
         tabPanel(
+          title = "Data Table",
+          br(),
+          div(class="control-row",
+              numericInput("tbl_days", "Show last N days", value = 15, min = 10, max = 60, step = 1, width = "160px")
+          ),
+          DTOutput("data_tbl") %>% withSpinner(type = 6, color = "#1b6ec2"),
+          br(),
+          downloadButton("dl_table", "Download CSV (Data Table)")
+        ),
+        tabPanel(
           title = "README",
           br(),
           tags$pre(style="white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo;",
@@ -293,9 +289,7 @@ server <- function(input, output, session){
 
   # Quotes -------------------------------------------------
   rt <- reactiveTimer(30000)
-  observeEvent(input$refresh_now, ignoreInit = TRUE, {
-    quote_stamp$val <- Sys.time()
-  })
+  observeEvent(input$refresh_now, ignoreInit = TRUE, { quote_stamp$val <- Sys.time() })
   quote_stamp <- reactiveValues(val = Sys.time())
 
   latest_quote <- reactive({
@@ -449,7 +443,6 @@ server <- function(input, output, session){
     if (is.null(xS) || is.null(xN)) return(NULL)
     s <- if (pars$use_adj && NCOL(xS)>=6) xS[,6] else Cl(xS)
     n <- if (NCOL(xN)>=6) xN[,6] else Cl(xN)
-    # align
     idx <- intersect(index(s), index(n))
     s <- s[idx]; n <- n[idx]
     if (NROW(s) < 20) return(NULL)
@@ -468,7 +461,6 @@ server <- function(input, output, session){
     te    <- sd(rs - rn, na.rm=TRUE)*sqrt(ann)
     ir    <- (mean(rs, na.rm=TRUE)-mean(rn, na.rm=TRUE))*ann / ifelse(te>0, te, NA_real_)
     mddS  <- max_drawdown_pct(s)
-
     data.frame(
       Metric = c("Beta (vs NIFTY)", "Correlation", "R²", "Ann. Vol (Stock)", "Ann. Vol (NIFTY)",
                  "Max Drawdown (Stock, %)", "Tracking Error", "Information Ratio"),
@@ -568,6 +560,61 @@ server <- function(input, output, session){
       layout(showlegend = FALSE)
   })
 
+  # ---------------- Data Table (last N days) ----------------
+  table_df <- reactive({
+    pars <- debounced_inputs()
+    x <- prices_xts()
+    req(x)
+
+    # choose series for CC return per setting
+    close_series <- if (pars$use_adj && NCOL(x) >= 6) x[,6] else Cl(x)
+
+    df <- data.frame(
+      Date    = as.Date(index(x)),
+      Open    = as.numeric(x[,1]),
+      High    = as.numeric(x[,2]),
+      Low     = as.numeric(x[,3]),
+      Close   = as.numeric(x[,4]),
+      Volume  = as.numeric(x[,5]),
+      Adjusted= if (NCOL(x) >= 6) as.numeric(x[,6]) else NA_real_
+    )
+
+    # typical price (H+L+C)/3
+    df <- df %>%
+      mutate(`Avg Price` = (High + Low + Close)/3)
+
+    # open->close daily return
+    df <- df %>%
+      mutate(`OC Return %` = ifelse(Open > 0, (Close / Open - 1) * 100, NA_real_))
+
+    # close->close return based on chosen series (Close or Adjusted)
+    cc <- dailyReturn(close_series, type = "arithmetic")
+    cc_df <- data.frame(Date = as.Date(index(cc)), `CC Return %` = as.numeric(cc) * 100)
+    df <- df %>%
+      left_join(cc_df, by = "Date")
+
+    # keep last N days only
+    n_days <- max(10, min(60, ifelse(is.null(input$tbl_days), 15, input$tbl_days)))
+    tail(df, n_days) %>% arrange(desc(Date))
+  })
+
+  output$data_tbl <- renderDT({
+    d <- table_df()
+    validate(need(nrow(d) > 0, "No rows to display."))
+    datatable(
+      d,
+      rownames = FALSE,
+      options = list(
+        pageLength = 15,
+        lengthMenu = c(10, 15, 30, 60),
+        order = list(list(0, 'desc')),
+        scrollX = TRUE
+      )
+    ) %>%
+      formatRound(c("Open","High","Low","Close","Adjusted","Avg Price","OC Return %","CC Return %"), 2) %>%
+      formatCurrency("Volume", currency = "", interval = 3, mark = ",")
+  })
+
   # ----------------- Downloads -----------------
   output$dl_prices <- downloadHandler(
     filename = function(){
@@ -633,6 +680,16 @@ server <- function(input, output, session){
       if (!length(series)) stop("No series available.")
       df <- bind_rows(series)
       write.csv(df, file, row.names = FALSE)
+    }
+  )
+
+  output$dl_table <- downloadHandler(
+    filename = function(){
+      paste0(gsub("\\.NS$","", input$company), "_table_last_", input$tbl_days %||% 15, "d.csv")
+    },
+    content = function(file){
+      d <- table_df(); validate(need(nrow(d) > 0, "No data to download."))
+      write.csv(d, file, row.names = FALSE)
     }
   )
 
