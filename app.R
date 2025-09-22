@@ -79,7 +79,6 @@ fetch_nifty_fallback <- function(from, to) { tryCatch({ fetch_yahoo(NIFTY_YH, fr
 
 # ---- Normalization baseline helper ----
 norm_with_baseline <- function(dates, series, mode = "start", n_days = 0, date0 = NULL) {
-  # returns % change (100 * (series/base - 1)) using chosen baseline within available dates
   idx <- 1L
   if (mode == "n_days" && n_days > 0) {
     d0 <- max(min(dates) , max(dates) - n_days)
@@ -110,7 +109,7 @@ readme_md <- paste(
   sep = "\n"
 )
 
-# --- UI -----------------------------------------------------------------
+# --- UI (unchanged from previous message) ------------------------------
 ui <- fluidPage(
   theme = bs_theme(bootswatch = "flatly", base_font = font_google("Inter")),
   tags$head(tags$style(HTML("
@@ -334,7 +333,7 @@ server <- function(input, output, session){
                   if ("Trade Time" %in% names(q)) as.character(q$`Trade Time`) else "—"))
   })
 
-  # Last row table (robust)
+  # Last row table
   output$last_row_tbl <- renderTable({
     x <- prices_xts(); validate(need(!is.null(x) && NROW(x) > 0, "No data to display."))
     out <- tryCatch({
@@ -355,7 +354,7 @@ server <- function(input, output, session){
     out
   }, striped=TRUE, bordered=TRUE)
 
-  # Candlestick + Volume
+  # Candlestick + Volume (unchanged)
   output$price_plotly <- renderPlotly({
     pars <- debounced_inputs()
     x <- prices_xts(); validate(need(!is.null(x), "No data to plot yet."))
@@ -440,7 +439,7 @@ server <- function(input, output, session){
     data.frame(Field = fields, Value = vals, check.names = FALSE)
   }, striped = TRUE, bordered = TRUE)
 
-  # Risk metrics vs NIFTY
+  # Risk metrics vs NIFTY (unchanged)
   output$risk_tbl <- renderTable({
     pars <- debounced_inputs()
     xS <- prices_xts(); xN <- nifty_xts()
@@ -474,7 +473,7 @@ server <- function(input, output, session){
     )
   }, striped = TRUE, bordered = TRUE)
 
-  # --- Stock vs NIFTY ---------------------------------------------------
+  # --- Stock vs NIFTY (uses normalization controls) --------------------
   output$compare_plot <- renderPlotly({
     pars <- debounced_inputs()
     xS <- prices_xts(); xN <- nifty_xts()
@@ -523,7 +522,7 @@ server <- function(input, output, session){
     }
   })
 
-  # --- Watchlist --------------------------------------------------------
+  # --- Watchlist (overlay or stacked; optional normalization) ----------
   output$watch_plot <- renderPlotly({
     syms <- input$watchlist
     if (length(syms) == 0) return(NULL)
@@ -598,29 +597,30 @@ server <- function(input, output, session){
         `Gap %` = 100 * (Open / PrevClose - 1)
       )
 
-    # ATR(14) on HLC
     atr <- TTR::ATR(HLC = xts::xts(df[,c("High","Low","Close")], order.by = df$Date), n = 14)
     df$`ATR(14)` <- as.numeric(atr[, "atr"])
 
-    # Inside / Outside bar flags (vs previous day)
-    df <- df %>%
-      mutate(
-        InsideBar  = ifelse(!is.na(lag(High)) & High <= lag(High) & Low >= lag(Low), TRUE, FALSE),
-        OutsideBar = ifelse(!is.na(lag(High)) & High >= lag(High) & Low <= lag(Low), TRUE, FALSE)
-      )
+    df$InsideBar  <- ifelse(!is.na(lag(df$High)) & df$High <= lag(df$High) & df$Low >= lag(df$Low), TRUE, FALSE)
+    df$OutsideBar <- ifelse(!is.na(lag(df$High)) & df$High >= lag(df$High) & df$Low <= lag(df$Low), TRUE, FALSE)
 
     n_days <- max(10, min(90, ifelse(is.null(input$tbl_days), 15, input$tbl_days)))
     tail(df, n_days) %>% arrange(desc(Date))
   })
 
-  # dynamic filter UI (ranges depend on current table)
+  # dynamic filter UI
   output$tbl_filters <- renderUI({
     d <- base_table_df(); req(nrow(d) > 0)
 
     oc <- range(d$`OC Return %`, na.rm = TRUE); if (!all(is.finite(oc))) oc <- c(-10, 10)
+
+    # FIX: use quantmod::dailyReturn (not TTR)
     cc_series <- xts::xts(d$Close, d$Date)
-    cc <- TTR::dailyReturn(cc_series, type = "arithmetic")
-    d$`CC Return %` <- as.numeric(cc) * 100
+    cc_xts <- try(quantmod::dailyReturn(cc_series, type = "arithmetic"), silent = TRUE)
+    if (inherits(cc_xts, "try-error") || NROW(cc_xts) == 0) {
+      d$`CC Return %` <- NA_real_
+    } else {
+      d$`CC Return %` <- as.numeric(cc_xts) * 100
+    }
     cc_rng <- range(d$`CC Return %`, na.rm = TRUE); if (!all(is.finite(cc_rng))) cc_rng <- c(-10, 10)
 
     pr <- range(d$Close, na.rm = TRUE); if (!all(is.finite(pr))) pr <- c(0, 1)
@@ -667,9 +667,9 @@ server <- function(input, output, session){
   filtered_df <- reactive({
     d <- base_table_df(); req(nrow(d) > 0)
 
-    # compute CC Return % for filtering/columns
-    cc <- TTR::dailyReturn(xts::xts(d$Close, d$Date), type = "arithmetic")
-    d$`CC Return %` <- as.numeric(cc) * 100
+    # FIX: use quantmod::dailyReturn (not TTR)
+    cc_xts <- try(quantmod::dailyReturn(xts::xts(d$Close, d$Date), type = "arithmetic"), silent = TRUE)
+    d$`CC Return %` <- if (inherits(cc_xts, "try-error") || NROW(cc_xts) == 0) NA_real_ else as.numeric(cc_xts) * 100
 
     if (isTRUE(input$tbl_only_up)) d <- d %>% filter(Close >= Open)
 
@@ -689,7 +689,6 @@ server <- function(input, output, session){
     if (!is.null(input$tbl_weekday)) d <- d %>% filter(Weekday %in% input$tbl_weekday)
     if (!is.null(input$tbl_month)) d <- d %>% filter(Month %in% input$tbl_month)
 
-    # Pattern filter
     if (!is.null(input$tbl_patterns)) {
       keep_in  <- "Inside Bar"  %in% input$tbl_patterns
       keep_out <- "Outside Bar" %in% input$tbl_patterns
@@ -788,13 +787,8 @@ server <- function(input, output, session){
   )
 
   output$dl_table <- downloadHandler(
-    filename = function(){
-      paste0(gsub("\\.NS$","", input$company), "_table_filtered.csv")
-    },
-    content = function(file){
-      d <- filtered_df(); validate(need(nrow(d) > 0, "No data to download."))
-      write.csv(d, file, row.names = FALSE)
-    }
+    filename = function(){ paste0(gsub("\\.NS$","", input$company), "_table_filtered.csv") },
+    content = function(file){ d <- filtered_df(); validate(need(nrow(d) > 0, "No data to download.")); write.csv(d, file, row.names = FALSE) }
   )
 
   output$dl_readme <- downloadHandler(
