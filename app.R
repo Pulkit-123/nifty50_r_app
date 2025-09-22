@@ -72,25 +72,24 @@ theme_toggle_safe <- function() {
 }
 fetch_yahoo <- memoise::memoise(.fetch_yahoo)
 
-safe_last_first_ret <- function(x) {
-  if (NROW(x) < 2) return(NA_real_)
-  as.numeric(last(x) / first(x) - 1)
-}
+safe_last_first_ret <- function(x) { if (NROW(x) < 2) return(NA_real_); as.numeric(last(x) / first(x) - 1) }
+daily_log_returns <- function(px) { px <- na.locf(px, na.rm = FALSE); px <- na.omit(px); if (NROW(px) < 2) return(xts()); diff(log(px)) }
+max_drawdown_pct <- function(px) { if (NROW(px) < 2) return(NA_real_); cum <- as.numeric(px); run_max <- cummax(cum); min((cum/run_max) - 1, na.rm = TRUE) * 100 }
+fetch_nifty_fallback <- function(from, to) { tryCatch({ fetch_yahoo(NIFTY_YH, from, to) }, error = function(e) NULL) }
 
-daily_log_returns <- function(px) {
-  px <- na.locf(px, na.rm = FALSE); px <- na.omit(px)
-  if (NROW(px) < 2) return(xts())
-  diff(log(px))
-}
-
-max_drawdown_pct <- function(px) {
-  if (NROW(px) < 2) return(NA_real_)
-  cum <- as.numeric(px); run_max <- cummax(cum)
-  min((cum/run_max) - 1, na.rm = TRUE) * 100
-}
-
-fetch_nifty_fallback <- function(from, to) {
-  tryCatch({ fetch_yahoo(NIFTY_YH, from, to) }, error = function(e) NULL)
+# ---- Normalization baseline helper ----
+norm_with_baseline <- function(dates, series, mode = "start", n_days = 0, date0 = NULL) {
+  # returns % change (100 * (series/base - 1)) using chosen baseline within available dates
+  idx <- 1L
+  if (mode == "n_days" && n_days > 0) {
+    d0 <- max(min(dates) , max(dates) - n_days)
+    idx <- which.max(dates >= d0)
+  } else if (mode == "date" && !is.null(date0)) {
+    idx <- which.max(dates >= as.Date(date0))
+    if (idx == 0) idx <- 1L
+  }
+  base <- series[idx]
+  100 * (series / base - 1)
 }
 
 readme_md <- paste(
@@ -101,11 +100,11 @@ readme_md <- paste(
   "## Features",
   "- Candlesticks + volume (green up / red down), log-scale, configurable SMAs.",
   "- Real-time quote (auto-refresh + manual refresh).",
-  "- Stock vs NIFTY (dual-axis or normalized %).",
+  "- Stock vs NIFTY (dual-axis or normalized % with **custom baseline**).",
+  "- Watchlist small-multiples (**overlay** or **stacked**; shared X in stacked).",
+  "- **Data Table** with filters: weekday, month, up-days, Volume range, **ATR(14)** range, **Gap %** range, inside/outside bar.",
   "- Risk metrics (β, corr, R², vol, max DD, tracking error, info ratio).",
-  "- Watchlist small-multiples.",
-  "- **Data Table** (last N days with OHLCV, Avg Price, OC% & CC% returns).",
-  "- Alerts, caching, debounced inputs, themed UI, CSV downloads.",
+  "- CSV downloads, caching, debounced inputs, themed UI.",
   "",
   "Run: `shiny::runApp()`",
   sep = "\n"
@@ -145,6 +144,17 @@ ui <- fluidPage(
           checkboxInput("log_scale","Log scale", value = FALSE)
       ),
       checkboxInput("use_adjusted","Use Adjusted Close for returns", TRUE),
+      hr(),
+      strong("Normalization baseline (for %-change views)"),
+      div(class="control-row",
+          radioButtons("norm_mode", NULL,
+                       c("Start of range"="start","N days ago"="n_days","Specific date"="date"),
+                       selected = "start", inline = TRUE)
+      ),
+      div(class="control-row",
+          numericInput("norm_n", "N (days ago)", value = 30, min = 1, step = 1, width = "150px"),
+          dateInput("norm_date", "Baseline date", value = Sys.Date()-90, weekstart = 1)
+      ),
       hr(),
       strong("Alerts"),
       div(class="control-row",
@@ -192,7 +202,7 @@ ui <- fluidPage(
           title = "Stock vs Nifty",
           br(),
           div(class="control-row",
-              checkboxInput("normalize_pct", "Normalize to % change (same left Y-axis)", FALSE)
+              checkboxInput("normalize_pct", "Normalize to % change (uses baseline above)", FALSE)
           ),
           plotlyOutput("compare_plot", height = "520px") %>% withSpinner(type = 6, color = "#1b6ec2"),
           br(),
@@ -202,12 +212,16 @@ ui <- fluidPage(
           title = "Watchlist",
           br(),
           selectizeInput("watchlist","Add tickers", choices = nifty_map,
-                         multiple = TRUE, options = list(placeholder = 'Pick 1–8 tickers…')),
+                         multiple = TRUE, options = list(placeholder = 'Pick tickers…')),
           div(class="control-row",
-              checkboxInput("wl_normalize","Normalize to % change", TRUE),
-              numericInput("wl_max","Max panels", value = 6, min = 2, max = 12, step = 1, width = "130px")
+              radioButtons("wl_layout","Layout",
+                           c("One per row (stacked)"="stacked",
+                             "Overlay (single chart)"="overlay"),
+                           selected = "stacked", inline = TRUE),
+              checkboxInput("wl_normalize","Normalize to % change (uses baseline above)", TRUE),
+              numericInput("wl_max","Max symbols (stacked)", value = 10, min = 2, max = 30, step = 1, width = "200px")
           ),
-          plotlyOutput("watch_plot", height = "700px") %>% withSpinner(type = 6, color = "#1b6ec2"),
+          plotlyOutput("watch_plot", height = "1000px") %>% withSpinner(type = 6, color = "#1b6ec2"),
           br(),
           downloadButton("dl_watchlist", "Download CSV (Watchlist panel)")
         ),
@@ -215,8 +229,10 @@ ui <- fluidPage(
           title = "Data Table",
           br(),
           div(class="control-row",
-              numericInput("tbl_days", "Show last N days", value = 15, min = 10, max = 60, step = 1, width = "160px")
+              numericInput("tbl_days", "Show last N days", value = 15, min = 10, max = 90, step = 1, width = "160px"),
+              checkboxInput("tbl_only_up","Only Up days (Close ≥ Open)", FALSE)
           ),
+          uiOutput("tbl_filters"),
           DTOutput("data_tbl") %>% withSpinner(type = 6, color = "#1b6ec2"),
           br(),
           downloadButton("dl_table", "Download CSV (Data Table)")
@@ -318,7 +334,7 @@ server <- function(input, output, session){
                   if ("Trade Time" %in% names(q)) as.character(q$`Trade Time`) else "—"))
   })
 
-  # Last row table (hardened)
+  # Last row table (robust)
   output$last_row_tbl <- renderTable({
     x <- prices_xts(); validate(need(!is.null(x) && NROW(x) > 0, "No data to display."))
     out <- tryCatch({
@@ -333,12 +349,9 @@ server <- function(input, output, session){
         Adjusted = if (NCOL(lr) >= 6) round(as.numeric(Ad(lr)), 2) else NA_real_,
         check.names = FALSE, stringsAsFactors = FALSE
       )
-      # human-friendly volume AFTER numerics computed
       df$Volume <- label_number_si()(df$Volume)
       df
-    }, error = function(e) {
-      NULL
-    })
+    }, error = function(e) { NULL })
     out
   }, striped=TRUE, bordered=TRUE)
 
@@ -461,7 +474,7 @@ server <- function(input, output, session){
     )
   }, striped = TRUE, bordered = TRUE)
 
-  # Comparison plot
+  # --- Stock vs NIFTY ---------------------------------------------------
   output$compare_plot <- renderPlotly({
     pars <- debounced_inputs()
     xS <- prices_xts(); xN <- nifty_xts()
@@ -478,8 +491,10 @@ server <- function(input, output, session){
 
     if (isTRUE(input$normalize_pct)) {
       df <- df %>%
-        mutate(NIFTY = (NIFTY/first(NIFTY) - 1)*100,
-               Stock = (Stock/first(Stock) - 1)*100)
+        mutate(
+          NIFTY = norm_with_baseline(Date, NIFTY, input$norm_mode, input$norm_n, input$norm_date),
+          Stock = norm_with_baseline(Date, Stock, input$norm_mode, input$norm_n, input$norm_date)
+        )
       plot_ly() %>%
         add_lines(data = df, x = ~Date, y = ~NIFTY, name = "NIFTY (%Δ)",
                   line = list(width = 2),
@@ -489,7 +504,7 @@ server <- function(input, output, session){
                   hovertemplate = "Stock: %{y:.2f}%%<extra></extra>") %>%
         layout(hovermode = "x unified",
                xaxis = list(title = "Date"),
-               yaxis = list(title = "% Change (since start)", rangemode = "tozero"),
+               yaxis = list(title = "% Change vs baseline", rangemode = "tozero"),
                legend = list(orientation = "h", x = 0, y = 1.02))
     } else {
       plot_ly() %>%
@@ -508,11 +523,10 @@ server <- function(input, output, session){
     }
   })
 
-  # Watchlist
+  # --- Watchlist --------------------------------------------------------
   output$watch_plot <- renderPlotly({
     syms <- input$watchlist
     if (length(syms) == 0) return(NULL)
-    syms <- syms[seq_len(min(length(syms), input$wl_max))]
     dr <- input$daterange
 
     series <- purrr::map(syms, function(s) {
@@ -520,39 +534,49 @@ server <- function(input, output, session){
       if (inherits(x, "try-error") || is.null(x)) return(NULL)
       cl <- Cl(x)
       tibble(Symbol = s, Date = as.Date(index(cl)), Close = as.numeric(cl))
-    })
+    }) %>% purrr::compact()
 
-    series <- purrr::compact(series)
     if (!length(series)) return(NULL)
     df <- bind_rows(series)
 
     if (isTRUE(input$wl_normalize)) {
       df <- df %>% group_by(Symbol) %>%
         arrange(Date) %>%
-        mutate(Value = (Close/first(Close) - 1)*100) %>%
+        mutate(Value = norm_with_baseline(Date, Close, input$norm_mode, input$norm_n, input$norm_date)) %>%
         ungroup()
-      y_title <- "% Change (since start)"; fmt <- "%{y:.2f}%%"
+      y_title <- "% Change vs baseline"; hover_fmt <- "%{y:.2f}%%"
     } else {
       df <- df %>% rename(Value = Close)
-      y_title <- "Price"; fmt <- "%{y:.2f}"
+      y_title <- "Price"; hover_fmt <- "%{y:.2f}"
     }
 
-    plots <- lapply(split(df, df$Symbol), function(d) {
-      plot_ly(d, x = ~Date, y = ~Value, type = "scatter", mode = "lines",
-              name = unique(d$Symbol),
-              hovertemplate = paste0(unique(d$Symbol), ": ", fmt, "<extra></extra>")) %>%
-        layout(yaxis = list(title = y_title))
-    })
-    subplot(plots, nrows = ceiling(length(plots)/2), shareX = TRUE, titleY = TRUE) %>%
-      layout(showlegend = FALSE)
+    if (identical(input$wl_layout, "overlay")) {
+      p <- plot_ly()
+      for (sym in unique(df$Symbol)) {
+        d <- df %>% filter(Symbol == sym)
+        p <- add_lines(p, data = d, x = ~Date, y = ~Value, name = sym,
+                       hovertemplate = paste0(sym, ": ", hover_fmt, "<extra></extra>"))
+      }
+      p %>% layout(yaxis = list(title = y_title), xaxis = list(title = "Date"),
+                   legend = list(orientation = "h", x = 0, y = 1.02))
+    } else {
+      plots <- lapply(split(df, df$Symbol), function(d) {
+        plot_ly(d, x = ~Date, y = ~Value, type = "scatter", mode = "lines",
+                name = unique(d$Symbol),
+                hovertemplate = paste0(unique(d$Symbol), ": ", hover_fmt, "<extra></extra>")) %>%
+          layout(yaxis = list(title = y_title))
+      })
+      n <- min(length(plots), max(1, input$wl_max))
+      subplot(plots[seq_len(n)], nrows = n, shareX = TRUE, titleY = TRUE) %>%
+        layout(showlegend = FALSE)
+    }
   })
 
-  # ---------------- Data Table (last N days) ----------------
-  table_df <- reactive({
+  # ---------------- Data Table (last N days + filters) ----------------
+  base_table_df <- reactive({
     pars <- debounced_inputs()
     x <- prices_xts(); req(x)
 
-    # choose series for CC return
     close_series <- if (pars$use_adj && NCOL(x) >= 6) Ad(x) else Cl(x)
 
     df <- data.frame(
@@ -565,31 +589,127 @@ server <- function(input, output, session){
       Adjusted = if (NCOL(x) >= 6) as.numeric(Ad(x)) else NA_real_,
       check.names = FALSE
     ) %>%
-      mutate(`Avg Price` = (High + Low + Close)/3,
-             `OC Return %` = ifelse(Open > 0, (Close / Open - 1) * 100, NA_real_))
+      mutate(
+        `Avg Price` = (High + Low + Close)/3,
+        `OC Return %` = ifelse(Open > 0, (Close / Open - 1) * 100, NA_real_),
+        Weekday = weekdays(Date),
+        Month = month(Date, label = TRUE, abbr = TRUE),
+        PrevClose = lag(Close),
+        `Gap %` = 100 * (Open / PrevClose - 1)
+      )
 
-    cc <- dailyReturn(close_series, type = "arithmetic")
-    cc_df <- data.frame(Date = as.Date(index(cc)),
-                        `CC Return %` = as.numeric(cc) * 100,
-                        check.names = FALSE)
+    # ATR(14) on HLC
+    atr <- TTR::ATR(HLC = xts::xts(df[,c("High","Low","Close")], order.by = df$Date), n = 14)
+    df$`ATR(14)` <- as.numeric(atr[, "atr"])
 
-    df <- df %>% left_join(cc_df, by = "Date")
+    # Inside / Outside bar flags (vs previous day)
+    df <- df %>%
+      mutate(
+        InsideBar  = ifelse(!is.na(lag(High)) & High <= lag(High) & Low >= lag(Low), TRUE, FALSE),
+        OutsideBar = ifelse(!is.na(lag(High)) & High >= lag(High) & Low <= lag(Low), TRUE, FALSE)
+      )
 
-    n_days <- max(10, min(60, ifelse(is.null(input$tbl_days), 15, input$tbl_days)))
+    n_days <- max(10, min(90, ifelse(is.null(input$tbl_days), 15, input$tbl_days)))
     tail(df, n_days) %>% arrange(desc(Date))
   })
 
+  # dynamic filter UI (ranges depend on current table)
+  output$tbl_filters <- renderUI({
+    d <- base_table_df(); req(nrow(d) > 0)
+
+    oc <- range(d$`OC Return %`, na.rm = TRUE); if (!all(is.finite(oc))) oc <- c(-10, 10)
+    cc_series <- xts::xts(d$Close, d$Date)
+    cc <- TTR::dailyReturn(cc_series, type = "arithmetic")
+    d$`CC Return %` <- as.numeric(cc) * 100
+    cc_rng <- range(d$`CC Return %`, na.rm = TRUE); if (!all(is.finite(cc_rng))) cc_rng <- c(-10, 10)
+
+    pr <- range(d$Close, na.rm = TRUE); if (!all(is.finite(pr))) pr <- c(0, 1)
+    vol_rng <- range(d$Volume, na.rm = TRUE); if (!all(is.finite(vol_rng))) vol_rng <- c(0, 1)
+    atr_rng <- range(d$`ATR(14)`, na.rm = TRUE); if (!all(is.finite(atr_rng))) atr_rng <- c(0, 1)
+    gap_rng <- range(d$`Gap %`, na.rm = TRUE); if (!all(is.finite(gap_rng))) gap_rng <- c(-10, 10)
+
+    all_cols <- colnames(d)
+    default_cols <- c("Date","Open","High","Low","Close","Adjusted","Avg Price","OC Return %","CC Return %","Volume","ATR(14)","Gap %","Weekday","Month")
+    default_cols <- intersect(default_cols, all_cols)
+
+    tagList(
+      div(class="control-row",
+          sliderInput("tbl_oc_rng","OC Return %", min = floor(oc[1]), max = ceiling(oc[2]),
+                      value = c(floor(oc[1]), ceiling(oc[2])), step = 0.1, width = "300px"),
+          sliderInput("tbl_cc_rng","CC Return %", min = floor(cc_rng[1]), max = ceiling(cc_rng[2]),
+                      value = c(floor(cc_rng[1]), ceiling(cc_rng[2])), step = 0.1, width = "300px"),
+          sliderInput("tbl_px_rng","Close price", min = floor(pr[1]), max = ceiling(pr[2]),
+                      value = c(floor(pr[1]), ceiling(pr[2])), step = 1, width = "300px")
+      ),
+      div(class="control-row",
+          sliderInput("tbl_vol_rng","Volume", min = floor(vol_rng[1]), max = ceiling(vol_rng[2]),
+                      value = c(floor(vol_rng[1]), ceiling(vol_rng[2])), step = 1, width = "300px"),
+          sliderInput("tbl_atr_rng","ATR(14)", min = floor(atr_rng[1]), max = ceiling(atr_rng[2]),
+                      value = c(floor(atr_rng[1]), ceiling(atr_rng[2])), step = 0.1, width = "300px"),
+          sliderInput("tbl_gap_rng","Gap %", min = floor(gap_rng[1]), max = ceiling(gap_rng[2]),
+                      value = c(floor(gap_rng[1]), ceiling(gap_rng[2])), step = 0.1, width = "300px")
+      ),
+      div(class="control-row",
+          selectizeInput("tbl_weekday","Weekday", choices = unique(d$Weekday),
+                         selected = unique(d$Weekday), multiple = TRUE),
+          selectizeInput("tbl_month","Month", choices = levels(d$Month),
+                         selected = levels(d$Month), multiple = TRUE),
+          selectizeInput("tbl_patterns","Candle pattern", choices = c("Inside Bar","Outside Bar"),
+                         selected = c("Inside Bar","Outside Bar"), multiple = TRUE)
+      ),
+      selectizeInput("tbl_cols","Columns to show (Date always included)",
+                     choices = all_cols, selected = default_cols, multiple = TRUE,
+                     options = list(plugins = list("remove_button")))
+    )
+  })
+
+  # filtered table
+  filtered_df <- reactive({
+    d <- base_table_df(); req(nrow(d) > 0)
+
+    # compute CC Return % for filtering/columns
+    cc <- TTR::dailyReturn(xts::xts(d$Close, d$Date), type = "arithmetic")
+    d$`CC Return %` <- as.numeric(cc) * 100
+
+    if (isTRUE(input$tbl_only_up)) d <- d %>% filter(Close >= Open)
+
+    if (!is.null(input$tbl_oc_rng)) d <- d %>% filter(`OC Return %` >= input$tbl_oc_rng[1],
+                                                      `OC Return %` <= input$tbl_oc_rng[2])
+    if (!is.null(input$tbl_cc_rng)) d <- d %>% filter(`CC Return %` >= input$tbl_cc_rng[1],
+                                                      `CC Return %` <= input$tbl_cc_rng[2])
+    if (!is.null(input$tbl_px_rng)) d <- d %>% filter(Close >= input$tbl_px_rng[1],
+                                                      Close <= input$tbl_px_rng[2])
+    if (!is.null(input$tbl_vol_rng)) d <- d %>% filter(Volume >= input$tbl_vol_rng[1],
+                                                       Volume <= input$tbl_vol_rng[2])
+    if (!is.null(input$tbl_atr_rng)) d <- d %>% filter(`ATR(14)` >= input$tbl_atr_rng[1],
+                                                       `ATR(14)` <= input$tbl_atr_rng[2])
+    if (!is.null(input$tbl_gap_rng)) d <- d %>% filter(`Gap %` >= input$tbl_gap_rng[1],
+                                                       `Gap %` <= input$tbl_gap_rng[2])
+
+    if (!is.null(input$tbl_weekday)) d <- d %>% filter(Weekday %in% input$tbl_weekday)
+    if (!is.null(input$tbl_month)) d <- d %>% filter(Month %in% input$tbl_month)
+
+    # Pattern filter
+    if (!is.null(input$tbl_patterns)) {
+      keep_in  <- "Inside Bar"  %in% input$tbl_patterns
+      keep_out <- "Outside Bar" %in% input$tbl_patterns
+      d <- d %>% filter((keep_in & InsideBar) | (keep_out & OutsideBar) | (!keep_in & !keep_out))
+    }
+
+    keep <- intersect(c("Date", input$tbl_cols), colnames(d))
+    if (!"Date" %in% keep) keep <- c("Date", keep)
+    d[, keep, drop = FALSE]
+  })
+
   output$data_tbl <- renderDT({
-    d <- table_df(); validate(need(nrow(d) > 0, "No rows to display."))
-    # Build the widget
+    d <- filtered_df(); validate(need(nrow(d) > 0, "No rows to display."))
     dt <- datatable(
-      d, rownames = FALSE,
-      options = list(pageLength = 15, lengthMenu = c(10, 15, 30, 60),
+      d, rownames = FALSE, filter = "top",
+      options = list(pageLength = 15, lengthMenu = c(10, 15, 30, 90),
                      order = list(list(0, 'desc')), scrollX = TRUE)
     )
-    # Safe formatting (only apply to columns that exist)
     round_cols <- intersect(
-      c("Open","High","Low","Close","Adjusted","Avg Price","OC Return %","CC Return %"),
+      c("Open","High","Low","Close","Adjusted","Avg Price","OC Return %","CC Return %","ATR(14)","Gap %"),
       colnames(d)
     )
     if (length(round_cols)) dt <- DT::formatRound(dt, round_cols, 2)
@@ -635,10 +755,13 @@ server <- function(input, output, session){
       dfS <- data.frame(Date = as.Date(index(stock_series)), Stock = as.numeric(stock_series))
       dfN <- data.frame(Date = as.Date(index(nifty_series)), NIFTY = as.numeric(nifty_series))
       df <- dfN %>% left_join(dfS, by = "Date")
+
       if (isTRUE(input$normalize_pct)) {
         df <- df %>%
-          mutate(NIFTY_pct = (NIFTY / first(NIFTY) - 1) * 100,
-                 Stock_pct = (Stock / first(Stock) - 1) * 100)
+          mutate(
+            NIFTY_pct = norm_with_baseline(Date, NIFTY, input$norm_mode, input$norm_n, input$norm_date),
+            Stock_pct = norm_with_baseline(Date, Stock, input$norm_mode, input$norm_n, input$norm_date)
+          )
       }
       write.csv(df, file, row.names = FALSE)
     }
@@ -657,8 +780,8 @@ server <- function(input, output, session){
         if (inherits(x, "try-error") || is.null(x)) return(NULL)
         cl <- Cl(x)
         tibble(Symbol = s, Date = as.Date(index(cl)), Close = as.numeric(cl))
-      })
-      series <- purrr::compact(series); if (!length(series)) stop("No series available.")
+      }) %>% purrr::compact()
+      if (!length(series)) stop("No series available.")
       df <- bind_rows(series)
       write.csv(df, file, row.names = FALSE)
     }
@@ -666,11 +789,10 @@ server <- function(input, output, session){
 
   output$dl_table <- downloadHandler(
     filename = function(){
-      paste0(gsub("\\.NS$","", input$company), "_table_last_",
-             ifelse(is.null(input$tbl_days), 15, input$tbl_days), "d.csv")
+      paste0(gsub("\\.NS$","", input$company), "_table_filtered.csv")
     },
     content = function(file){
-      d <- table_df(); validate(need(nrow(d) > 0, "No data to download."))
+      d <- filtered_df(); validate(need(nrow(d) > 0, "No data to download."))
       write.csv(d, file, row.names = FALSE)
     }
   )
