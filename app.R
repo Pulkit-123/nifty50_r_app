@@ -13,7 +13,7 @@ if (isTRUE(getOption("nifty50.autoinstall", TRUE))) {
   if (length(to_install)) install.packages(to_install, repos = "https://cloud.r-project.org")
 }
 
-# --- 1) Libraries ----------------------------------------------------------
+# --- Libraries ----------------------------------------------------------
 library(shiny)
 library(bslib)
 library(quantmod)
@@ -29,7 +29,7 @@ library(purrr)
 library(stringr)
 suppressPackageStartupMessages(try(library(nser), silent = TRUE))
 
-# --- 2) App config ---------------------------------------------------------
+# --- Config -------------------------------------------------------------
 options(warn = -1)
 Sys.setenv(TZ = "Asia/Kolkata")
 NIFTY_YH <- "^NSEI"                 # Yahoo symbol for NIFTY 50 index
@@ -56,8 +56,19 @@ nifty_map <- c(
   "LTI Mindtree"="LTIM.NS","Shriram Finance"="SHRIRAMFIN.NS"
 )
 
-# --- 3) Helpers: fetchers, math, caching ----------------------------------
-# Cached Yahoo fetch
+# --- Helpers: safe theme toggle ----------------------------------------
+theme_toggle_safe <- function() {
+  # Return a bslib theme toggle button if available, else NULL
+  if (requireNamespace("bslib", quietly = TRUE)) {
+    ns <- asNamespace("bslib")
+    if (exists("theme_toggle", envir = ns, inherits = FALSE)) {
+      return(bslib::theme_toggle())
+    }
+  }
+  NULL
+}
+
+# --- Helpers: fetchers, math, caching ----------------------------------
 .fetch_yahoo <- function(symbol, from, to) {
   suppressWarnings(
     getSymbols(Symbols = symbol, src = "yahoo",
@@ -66,13 +77,11 @@ nifty_map <- c(
 }
 fetch_yahoo <- memoise::memoise(.fetch_yahoo)
 
-# Sane last/first with NA guard
 safe_last_first_ret <- function(x) {
   if (NROW(x) < 2) return(NA_real_)
   as.numeric(last(x) / first(x) - 1)
 }
 
-# Daily log returns xts
 daily_log_returns <- function(px) {
   px <- na.locf(px, na.rm = FALSE)
   px <- na.omit(px)
@@ -80,7 +89,6 @@ daily_log_returns <- function(px) {
   diff(log(px))
 }
 
-# Max drawdown (%)
 max_drawdown_pct <- function(px) {
   if (NROW(px) < 2) return(NA_real_)
   cum <- as.numeric(px)
@@ -89,17 +97,14 @@ max_drawdown_pct <- function(px) {
   min(draw, na.rm = TRUE) * 100
 }
 
-# Try NSE fallback (very light; only when yahoo fails, and when 'nser' is available)
 fetch_nifty_fallback <- function(from, to) {
-  # If Yahoo fails for ^NSEI, try to use nser's index history (if available).
-  # nser API surface can change; keep this conservative.
+  # If Yahoo fails for ^NSEI, try alternative (stub stays Yahoo for now).
   tryCatch({
-    # If no direct index endpoint, just refetch Yahoo (noop).
     fetch_yahoo(NIFTY_YH, from, to)
   }, error = function(e) NULL)
 }
 
-# --- 4) README content (shown + downloadable) ------------------------------
+# --- README content -----------------------------------------------------
 readme_md <- paste(
   "# NIFTY 50 Shiny Dashboard",
   "",
@@ -116,7 +121,7 @@ readme_md <- paste(
   "- **Alerts** for % move and/or target price (toast notifications).",
   "- **Caching** (memoise) + **debounced inputs** for snappy UX.",
   "- **Downloads**: stock history, comparison series, watchlist panel data.",
-  "- **Theming** with `bslib` (light/dark toggle).",
+  "- **Theming** with `bslib` (light/dark toggle when available).",
   "",
   "## Data & Limits",
   "- Historical & quotes via Yahoo Finance; availability/adjustments can vary.",
@@ -132,7 +137,7 @@ readme_md <- paste(
   sep = "\n"
 )
 
-# --- 5) UI -----------------------------------------------------------------
+# --- UI -----------------------------------------------------------------
 ui <- fluidPage(
   theme = bs_theme(bootswatch = "flatly", base_font = font_google("Inter")),
   tags$head(tags$style(HTML("
@@ -143,8 +148,10 @@ ui <- fluidPage(
     .form-group{margin-bottom:10px;}
   "))),
   pageTitle = "NIFTY 50 — Real-Time & Historical",
-  titlePanel(tagList("NIFTY 50 — Real-Time & Historical (quantmod + Yahoo, interactive)",
-                     theme_toggle())),
+  titlePanel(tagList(
+    "NIFTY 50 — Real-Time & Historical (quantmod + Yahoo, interactive)",
+    theme_toggle_safe()  # <- safe toggle (NULL on older bslib)
+  )),
   sidebarLayout(
     sidebarPanel(
       div(class = "control-row",
@@ -244,7 +251,7 @@ ui <- fluidPage(
   )
 )
 
-# --- 6) SERVER -------------------------------------------------------------
+# --- SERVER -------------------------------------------------------------
 server <- function(input, output, session){
 
   # Debounce heavy triggers
@@ -310,8 +317,8 @@ server <- function(input, output, session){
       showNotification(paste0("ALERT: |%Δ| = ", sprintf("%.2f", pct), "%"), type = "message")
     }
     if (!is.na(input$alert_px) && is.finite(last) && last >= input$alert_px) {
-      showNotification(paste0("ALERT: Last crossed ", input$alert_px, " (Last=", sprintf("%.2f", last), ")"),
-                       type = "message")
+      showNotification(paste0("ALERT: Last crossed ", input$alert_px, " (Last=",
+                              sprintf("%.2f", last), ")"), type = "message")
     }
   })
 
@@ -447,7 +454,6 @@ server <- function(input, output, session){
     s <- s[idx]; n <- n[idx]
     if (NROW(s) < 20) return(NULL)
     rs <- daily_log_returns(s); rn <- daily_log_returns(n)
-    # align returns
     idx2 <- intersect(index(rs), index(rn))
     rs <- rs[idx2]; rn <- rn[idx2]
     if (NROW(rs) < 20) return(NULL)
@@ -528,7 +534,6 @@ server <- function(input, output, session){
     syms <- syms[seq_len(min(length(syms), input$wl_max))]
     dr <- input$daterange
 
-    # fetch all series (cached), quietly skip failures
     series <- purrr::map(syms, function(s) {
       x <- try(fetch_yahoo(s, dr[1], dr[2]), silent = TRUE)
       if (inherits(x, "try-error") || is.null(x)) return(NULL)
@@ -553,7 +558,6 @@ server <- function(input, output, session){
       fmt <- "%{y:.2f}"
     }
 
-    # Build facets via subplot
     plots <- lapply(split(df, df$Symbol), function(d) {
       plot_ly(d, x = ~Date, y = ~Value, type = "scatter", mode = "lines",
               name = unique(d$Symbol),
