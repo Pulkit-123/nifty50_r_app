@@ -3,7 +3,6 @@
 ##############################
 
 # ---- Auto-install guard ----------------------------------------------
-# Set this to FALSE in your R session before runGitHub() to skip installs:
 if (isTRUE(getOption("nifty50.autoinstall", TRUE))) {
   req_pkgs <- c(
     "shiny","bslib","quantmod","xts","dplyr","lubridate","plotly","TTR",
@@ -33,11 +32,10 @@ suppressPackageStartupMessages(try(library(nser), silent = TRUE))
 # --- Config -------------------------------------------------------------
 options(warn = -1)
 Sys.setenv(TZ = "Asia/Kolkata")
-NIFTY_YH <- "^NSEI"                 # Yahoo symbol for NIFTY 50 index
+NIFTY_YH <- "^NSEI"
 default_from <- Sys.Date() - 365
 default_to   <- Sys.Date()
 
-# NIFTY 50 map (edit as needed; Yahoo tickers)
 nifty_map <- c(
   "Reliance Industries"="RELIANCE.NS","HDFC Bank"="HDFCBANK.NS","ICICI Bank"="ICICIBANK.NS",
   "Infosys"="INFY.NS","TCS"="TCS.NS","Hindustan Unilever"="HINDUNILVR.NS","ITC"="ITC.NS",
@@ -53,22 +51,19 @@ nifty_map <- c(
   "Divi's Labs"="DIVISLAB.NS","Dr Reddy's"="DRREDDY.NS","Cipla"="CIPLA.NS","Grasim"="GRASIM.NS",
   "Tech Mahindra"="TECHM.NS","Eicher Motors"="EICHERMOT.NS","Hero MotoCorp"="HEROMOTOCO.NS",
   "Britannia"="BRITANNIA.NS","UPL"="UPL.NS","ONGC"="ONGC.NS","BPCL"="BPCL.NS",
-  "IndusInd Bank"="INDUSINDBK.NS","Bajaj Auto"="Bajaj-AUTO.NS","Apollo Hospitals"="APOLLOHOSP.NS",
+  "IndusInd Bank"="INDUSINDBK.NS","Bajaj Auto"="BAJAJ-AUTO.NS","Apollo Hospitals"="APOLLOHOSP.NS",
   "LTI Mindtree"="LTIM.NS","Shriram Finance"="SHRIRAMFIN.NS"
 )
 
-# --- Helpers: safe theme toggle ----------------------------------------
+# --- Helpers ------------------------------------------------------------
 theme_toggle_safe <- function() {
   if (requireNamespace("bslib", quietly = TRUE)) {
     ns <- asNamespace("bslib")
-    if (exists("theme_toggle", envir = ns, inherits = FALSE)) {
-      return(bslib::theme_toggle())
-    }
+    if (exists("theme_toggle", envir = ns, inherits = FALSE)) return(bslib::theme_toggle())
   }
   NULL
 }
 
-# --- Helpers: fetchers, math, caching ----------------------------------
 .fetch_yahoo <- function(symbol, from, to) {
   suppressWarnings(
     getSymbols(Symbols = symbol, src = "yahoo",
@@ -83,43 +78,36 @@ safe_last_first_ret <- function(x) {
 }
 
 daily_log_returns <- function(px) {
-  px <- na.locf(px, na.rm = FALSE)
-  px <- na.omit(px)
+  px <- na.locf(px, na.rm = FALSE); px <- na.omit(px)
   if (NROW(px) < 2) return(xts())
   diff(log(px))
 }
 
 max_drawdown_pct <- function(px) {
   if (NROW(px) < 2) return(NA_real_)
-  cum <- as.numeric(px)
-  run_max <- cummax(cum)
-  draw <- (cum / run_max) - 1
-  min(draw, na.rm = TRUE) * 100
+  cum <- as.numeric(px); run_max <- cummax(cum)
+  min((cum/run_max) - 1, na.rm = TRUE) * 100
 }
 
 fetch_nifty_fallback <- function(from, to) {
   tryCatch({ fetch_yahoo(NIFTY_YH, from, to) }, error = function(e) NULL)
 }
 
-# --- README content -----------------------------------------------------
 readme_md <- paste(
   "# NIFTY 50 Shiny Dashboard",
   "",
   "Interactive market app for Indian equities using **quantmod** (Yahoo Finance) and **plotly**.",
   "",
   "## Features",
-  "- Interactive **candlestick** + volume (green up / red down), log-scale toggle, configurable SMAs.",
-  "- **Real-time quote** badge (auto-refresh + manual refresh).",
-  "- **Stock vs NIFTY** comparison: dual-axis price vs price, or normalized % view.",
-  "- **Risk metrics** (β, corr, R², vol, max DD, tracking error, info ratio).",
-  "- **Watchlist** small-multiples (normalize toggle) with CSV export.",
-  "- **Data Table** tab for last N days with OHLCV, Avg Price, OC% and CC% returns.",
-  "- **Alerts**, **caching**, **debounced inputs**, themed UI, and CSV downloads.",
+  "- Candlesticks + volume (green up / red down), log-scale, configurable SMAs.",
+  "- Real-time quote (auto-refresh + manual refresh).",
+  "- Stock vs NIFTY (dual-axis or normalized %).",
+  "- Risk metrics (β, corr, R², vol, max DD, tracking error, info ratio).",
+  "- Watchlist small-multiples.",
+  "- **Data Table** (last N days with OHLCV, Avg Price, OC% & CC% returns).",
+  "- Alerts, caching, debounced inputs, themed UI, CSV downloads.",
   "",
-  "## Run Locally",
-  "```r",
-  "shiny::runApp()",
-  "```",
+  "Run: `shiny::runApp()`",
   sep = "\n"
 )
 
@@ -128,8 +116,7 @@ ui <- fluidPage(
   theme = bs_theme(bootswatch = "flatly", base_font = font_google("Inter")),
   tags$head(tags$style(HTML("
     .small-note{color:#666;font-size:12px;}
-    .neg {color:#c0392b;}
-    .pos {color:#27ae60;}
+    .neg {color:#c0392b;} .pos {color:#27ae60;}
     .control-row {display:flex; gap:10px; flex-wrap:wrap;}
     .form-group{margin-bottom:10px;}
   "))),
@@ -264,21 +251,17 @@ server <- function(input, output, session){
     sprintf("%s   (%s)", ifelse(length(name)==0, picked, name), picked)
   })
 
-  # Historical (stock) via Yahoo (cached)
+  # Historical (stock) and NIFTY
   prices_xts <- reactive({
     pars <- debounced_inputs()
     req(pars$dr[1], pars$dr[2], input$company)
     validate(need(!is.na(pars$dr[1]) && !is.na(pars$dr[2]) && pars$dr[1] <= pars$dr[2],
                   "Select a valid date range."))
-    tryCatch(
-      fetch_yahoo(input$company, pars$dr[1], pars$dr[2]),
-      error = function(e){
-        showNotification(paste("Historical fetch error:", e$message), type="error"); NULL
-      }
-    )
+    tryCatch(fetch_yahoo(input$company, pars$dr[1], pars$dr[2]),
+             error = function(e){ showNotification(paste("Historical fetch error:", e$message),
+                                                   type="error"); NULL })
   })
 
-  # Historical (NIFTY)
   nifty_xts <- reactive({
     pars <- debounced_inputs()
     req(pars$dr[1], pars$dr[2])
@@ -287,7 +270,7 @@ server <- function(input, output, session){
     out
   })
 
-  # Quotes -------------------------------------------------
+  # Quotes
   rt <- reactiveTimer(30000)
   observeEvent(input$refresh_now, ignoreInit = TRUE, { quote_stamp$val <- Sys.time() })
   quote_stamp <- reactiveValues(val = Sys.time())
@@ -301,19 +284,17 @@ server <- function(input, output, session){
                                                    type="warning"); NULL })
   })
 
-  # Alerts (percent / price)
+  # Alerts
   observe({
     if (!isTRUE(input$alerts_on)) return()
     q <- latest_quote(); if (is.null(q) || nrow(q)==0) return()
     last <- suppressWarnings(as.numeric(q$Last))
     pct  <- suppressWarnings(as.numeric(q$`% Change`))
-    if (!is.na(input$alert_pct) && is.finite(pct) && abs(pct) >= input$alert_pct) {
+    if (!is.na(input$alert_pct) && is.finite(pct) && abs(pct) >= input$alert_pct)
       showNotification(paste0("ALERT: |%Δ| = ", sprintf("%.2f", pct), "%"), type = "message")
-    }
-    if (!is.na(input$alert_px) && is.finite(last) && last >= input$alert_px) {
+    if (!is.na(input$alert_px) && is.finite(last) && last >= input$alert_px)
       showNotification(paste0("ALERT: Last crossed ", input$alert_px, " (Last=",
                               sprintf("%.2f", last), ")"), type = "message")
-    }
   })
 
   # Quote badge
@@ -337,20 +318,29 @@ server <- function(input, output, session){
                   if ("Trade Time" %in% names(q)) as.character(q$`Trade Time`) else "—"))
   })
 
-  # Latest OHLCV row
+  # Last row table (hardened)
   output$last_row_tbl <- renderTable({
-    x <- prices_xts(); if (is.null(x)) return(NULL)
-    lr <- tail(x, 1)
-    data.frame(
-      Date   = index(lr),
-      Open   = round(as.numeric(lr[,1]),2),
-      High   = round(as.numeric(lr[,2]),2),
-      Low    = round(as.numeric(lr[,3]),2),
-      Close  = round(as.numeric(lr[,4]),2),
-      Volume = label_number_si()(as.numeric(lr[,5])),
-      Adjusted = if (NCOL(lr)>=6) round(as.numeric(lr[,6]),2) else NA_real_
-    )
-  }, striped=TRUE, bordered=TRUE, digits=2)
+    x <- prices_xts(); validate(need(!is.null(x) && NROW(x) > 0, "No data to display."))
+    out <- tryCatch({
+      lr <- tail(x, 1)
+      df <- data.frame(
+        Date     = as.Date(index(lr)),
+        Open     = round(as.numeric(Op(lr)), 2),
+        High     = round(as.numeric(Hi(lr)), 2),
+        Low      = round(as.numeric(Lo(lr)), 2),
+        Close    = round(as.numeric(Cl(lr)), 2),
+        Volume   = as.numeric(Vo(lr)),
+        Adjusted = if (NCOL(lr) >= 6) round(as.numeric(Ad(lr)), 2) else NA_real_,
+        check.names = FALSE, stringsAsFactors = FALSE
+      )
+      # human-friendly volume AFTER numerics computed
+      df$Volume <- label_number_si()(df$Volume)
+      df
+    }, error = function(e) {
+      NULL
+    })
+    out
+  }, striped=TRUE, bordered=TRUE)
 
   # Candlestick + Volume
   output$price_plotly <- renderPlotly({
@@ -358,11 +348,12 @@ server <- function(input, output, session){
     x <- prices_xts(); validate(need(!is.null(x), "No data to plot yet."))
     df <- data.frame(
       Date = as.Date(index(x)),
-      Open = as.numeric(x[,1]),
-      High = as.numeric(x[,2]),
-      Low  = as.numeric(x[,3]),
-      Close= as.numeric(x[,4]),
-      Volume = as.numeric(x[,5])
+      Open = as.numeric(Op(x)),
+      High = as.numeric(Hi(x)),
+      Low  = as.numeric(Lo(x)),
+      Close= as.numeric(Cl(x)),
+      Volume = as.numeric(Vo(x)),
+      check.names = FALSE
     )
     sma_fast <- suppressWarnings(SMA(df$Close, n = max(2, min(400, pars$sma_fast))))
     sma_slow <- suppressWarnings(SMA(df$Close, n = max(2, min(400, pars$sma_slow))))
@@ -410,7 +401,7 @@ server <- function(input, output, session){
   output$ret_tbl <- renderTable({
     pars <- debounced_inputs()
     x <- prices_xts(); if (is.null(x)) return(NULL)
-    cl <- if (pars$use_adj && NCOL(x) >= 6) x[,6] else Cl(x)
+    cl <- if (pars$use_adj && NCOL(x) >= 6) Ad(x) else Cl(x)
     if (NROW(cl) < 2) return(NULL)
     ret_total <- safe_last_first_ret(cl)
     dr <- daily_log_returns(cl); if (NROW(dr) < 2) return(NULL)
@@ -441,14 +432,12 @@ server <- function(input, output, session){
     pars <- debounced_inputs()
     xS <- prices_xts(); xN <- nifty_xts()
     if (is.null(xS) || is.null(xN)) return(NULL)
-    s <- if (pars$use_adj && NCOL(xS)>=6) xS[,6] else Cl(xS)
-    n <- if (NCOL(xN)>=6) xN[,6] else Cl(xN)
-    idx <- intersect(index(s), index(n))
-    s <- s[idx]; n <- n[idx]
+    s <- if (pars$use_adj && NCOL(xS)>=6) Ad(xS) else Cl(xS)
+    n <- if (NCOL(xN)>=6) Ad(xN) else Cl(xN)
+    idx <- intersect(index(s), index(n)); s <- s[idx]; n <- n[idx]
     if (NROW(s) < 20) return(NULL)
     rs <- daily_log_returns(s); rn <- daily_log_returns(n)
-    idx2 <- intersect(index(rs), index(rn))
-    rs <- rs[idx2]; rn <- rn[idx2]
+    idx2 <- intersect(index(rs), index(rn)); rs <- rs[idx2]; rn <- rn[idx2]
     if (NROW(rs) < 20) return(NULL)
     ann <- 252
     volS <- sd(rs, na.rm=TRUE)*sqrt(ann)
@@ -472,14 +461,14 @@ server <- function(input, output, session){
     )
   }, striped = TRUE, bordered = TRUE)
 
-  # Dual-axis / Normalized comparison
+  # Comparison plot
   output$compare_plot <- renderPlotly({
     pars <- debounced_inputs()
     xS <- prices_xts(); xN <- nifty_xts()
     validate(need(!is.null(xS) && !is.null(xN), "Need both series to compare."))
 
-    stock_series <- if (pars$use_adj && NCOL(xS) >= 6) xS[,6] else Cl(xS)
-    nifty_series <- if (NCOL(xN) >= 6) xN[,6] else Cl(xN)
+    stock_series <- if (pars$use_adj && NCOL(xS) >= 6) Ad(xS) else Cl(xS)
+    nifty_series <- if (NCOL(xN) >= 6) Ad(xN) else Cl(xN)
 
     dfS <- data.frame(Date = as.Date(index(stock_series)), Stock = as.numeric(stock_series))
     dfN <- data.frame(Date = as.Date(index(nifty_series)), NIFTY = as.numeric(nifty_series))
@@ -519,7 +508,7 @@ server <- function(input, output, session){
     }
   })
 
-  # Watchlist small-multiples
+  # Watchlist
   output$watch_plot <- renderPlotly({
     syms <- input$watchlist
     if (length(syms) == 0) return(NULL)
@@ -542,12 +531,10 @@ server <- function(input, output, session){
         arrange(Date) %>%
         mutate(Value = (Close/first(Close) - 1)*100) %>%
         ungroup()
-      y_title <- "% Change (since start)"
-      fmt <- "%{y:.2f}%%"
+      y_title <- "% Change (since start)"; fmt <- "%{y:.2f}%%"
     } else {
       df <- df %>% rename(Value = Close)
-      y_title <- "Price"
-      fmt <- "%{y:.2f}"
+      y_title <- "Price"; fmt <- "%{y:.2f}"
     }
 
     plots <- lapply(split(df, df$Symbol), function(d) {
@@ -563,56 +550,51 @@ server <- function(input, output, session){
   # ---------------- Data Table (last N days) ----------------
   table_df <- reactive({
     pars <- debounced_inputs()
-    x <- prices_xts()
-    req(x)
+    x <- prices_xts(); req(x)
 
-    # choose series for CC return per setting
-    close_series <- if (pars$use_adj && NCOL(x) >= 6) x[,6] else Cl(x)
+    # choose series for CC return
+    close_series <- if (pars$use_adj && NCOL(x) >= 6) Ad(x) else Cl(x)
 
     df <- data.frame(
-      Date    = as.Date(index(x)),
-      Open    = as.numeric(x[,1]),
-      High    = as.numeric(x[,2]),
-      Low     = as.numeric(x[,3]),
-      Close   = as.numeric(x[,4]),
-      Volume  = as.numeric(x[,5]),
-      Adjusted= if (NCOL(x) >= 6) as.numeric(x[,6]) else NA_real_
-    )
+      Date     = as.Date(index(x)),
+      Open     = as.numeric(Op(x)),
+      High     = as.numeric(Hi(x)),
+      Low      = as.numeric(Lo(x)),
+      Close    = as.numeric(Cl(x)),
+      Volume   = as.numeric(Vo(x)),
+      Adjusted = if (NCOL(x) >= 6) as.numeric(Ad(x)) else NA_real_,
+      check.names = FALSE
+    ) %>%
+      mutate(`Avg Price` = (High + Low + Close)/3,
+             `OC Return %` = ifelse(Open > 0, (Close / Open - 1) * 100, NA_real_))
 
-    # typical price (H+L+C)/3
-    df <- df %>%
-      mutate(`Avg Price` = (High + Low + Close)/3)
-
-    # open->close daily return
-    df <- df %>%
-      mutate(`OC Return %` = ifelse(Open > 0, (Close / Open - 1) * 100, NA_real_))
-
-    # close->close return based on chosen series (Close or Adjusted)
     cc <- dailyReturn(close_series, type = "arithmetic")
-    cc_df <- data.frame(Date = as.Date(index(cc)), `CC Return %` = as.numeric(cc) * 100)
-    df <- df %>%
-      left_join(cc_df, by = "Date")
+    cc_df <- data.frame(Date = as.Date(index(cc)),
+                        `CC Return %` = as.numeric(cc) * 100,
+                        check.names = FALSE)
 
-    # keep last N days only
+    df <- df %>% left_join(cc_df, by = "Date")
+
     n_days <- max(10, min(60, ifelse(is.null(input$tbl_days), 15, input$tbl_days)))
     tail(df, n_days) %>% arrange(desc(Date))
   })
 
   output$data_tbl <- renderDT({
-    d <- table_df()
-    validate(need(nrow(d) > 0, "No rows to display."))
-    datatable(
-      d,
-      rownames = FALSE,
-      options = list(
-        pageLength = 15,
-        lengthMenu = c(10, 15, 30, 60),
-        order = list(list(0, 'desc')),
-        scrollX = TRUE
-      )
-    ) %>%
-      formatRound(c("Open","High","Low","Close","Adjusted","Avg Price","OC Return %","CC Return %"), 2) %>%
-      formatCurrency("Volume", currency = "", interval = 3, mark = ",")
+    d <- table_df(); validate(need(nrow(d) > 0, "No rows to display."))
+    # Build the widget
+    dt <- datatable(
+      d, rownames = FALSE,
+      options = list(pageLength = 15, lengthMenu = c(10, 15, 30, 60),
+                     order = list(list(0, 'desc')), scrollX = TRUE)
+    )
+    # Safe formatting (only apply to columns that exist)
+    round_cols <- intersect(
+      c("Open","High","Low","Close","Adjusted","Avg Price","OC Return %","CC Return %"),
+      colnames(d)
+    )
+    if (length(round_cols)) dt <- DT::formatRound(dt, round_cols, 2)
+    if ("Volume" %in% colnames(d)) dt <- DT::formatCurrency(dt, "Volume", currency = "", interval = 3, mark = ",")
+    dt
   })
 
   # ----------------- Downloads -----------------
@@ -625,13 +607,14 @@ server <- function(input, output, session){
     content = function(file){
       x <- prices_xts(); validate(need(!is.null(x), "No data to download."))
       df <- data.frame(
-        Date = index(x),
-        Open = as.numeric(x[,1]),
-        High = as.numeric(x[,2]),
-        Low  = as.numeric(x[,3]),
-        Close= as.numeric(x[,4]),
-        Volume = as.numeric(x[,5]),
-        Adjusted = if (NCOL(x)>=6) as.numeric(x[,6]) else NA_real_
+        Date = as.Date(index(x)),
+        Open = as.numeric(Op(x)),
+        High = as.numeric(Hi(x)),
+        Low  = as.numeric(Lo(x)),
+        Close= as.numeric(Cl(x)),
+        Volume = as.numeric(Vo(x)),
+        Adjusted = if (NCOL(x)>=6) as.numeric(Ad(x)) else NA_real_,
+        check.names = FALSE
       )
       write.csv(df, file, row.names = FALSE)
     }
@@ -647,8 +630,8 @@ server <- function(input, output, session){
       pars <- debounced_inputs()
       xS <- prices_xts(); xN <- nifty_xts(); validate(need(!is.null(xS) && !is.null(xN),
                                                            "No data to download."))
-      stock_series <- if (pars$use_adj && NCOL(xS) >= 6) xS[,6] else Cl(xS)
-      nifty_series <- if (NCOL(xN) >= 6) xN[,6] else Cl(xN)
+      stock_series <- if (pars$use_adj && NCOL(xS) >= 6) Ad(xS) else Cl(xS)
+      nifty_series <- if (NCOL(xN) >= 6) Ad(xN) else Cl(xN)
       dfS <- data.frame(Date = as.Date(index(stock_series)), Stock = as.numeric(stock_series))
       dfN <- data.frame(Date = as.Date(index(nifty_series)), NIFTY = as.numeric(nifty_series))
       df <- dfN %>% left_join(dfS, by = "Date")
@@ -667,8 +650,7 @@ server <- function(input, output, session){
              format(input$daterange[2], "%Y%m%d"), ".csv")
     },
     content = function(file){
-      syms <- input$watchlist
-      if (length(syms) == 0) stop("No symbols selected.")
+      syms <- input$watchlist; if (length(syms) == 0) stop("No symbols selected.")
       dr <- input$daterange
       series <- purrr::map(syms, function(s) {
         x <- try(fetch_yahoo(s, dr[1], dr[2]), silent = TRUE)
@@ -676,8 +658,7 @@ server <- function(input, output, session){
         cl <- Cl(x)
         tibble(Symbol = s, Date = as.Date(index(cl)), Close = as.numeric(cl))
       })
-      series <- purrr::compact(series)
-      if (!length(series)) stop("No series available.")
+      series <- purrr::compact(series); if (!length(series)) stop("No series available.")
       df <- bind_rows(series)
       write.csv(df, file, row.names = FALSE)
     }
@@ -685,7 +666,8 @@ server <- function(input, output, session){
 
   output$dl_table <- downloadHandler(
     filename = function(){
-      paste0(gsub("\\.NS$","", input$company), "_table_last_", input$tbl_days %||% 15, "d.csv")
+      paste0(gsub("\\.NS$","", input$company), "_table_last_",
+             ifelse(is.null(input$tbl_days), 15, input$tbl_days), "d.csv")
     },
     content = function(file){
       d <- table_df(); validate(need(nrow(d) > 0, "No data to download."))
