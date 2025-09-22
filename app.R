@@ -2,13 +2,16 @@
 # app.R — NIFTY 50 Dashboard #
 ##############################
 
-# --- 0) Install missing packages (one-time) -------------------------------
-req_pkgs <- c(
-  "shiny","bslib","quantmod","xts","dplyr","lubridate","plotly","TTR",
-  "memoise","shinycssloaders","scales","purrr","stringr","nser"
-)
-to_install <- req_pkgs[!req_pkgs %in% rownames(installed.packages())]
-if (length(to_install)) install.packages(to_install, repos = "https://cloud.r-project.org")
+# ---- Auto-install guard ----------------------------------------------
+# Set this to FALSE in your R session before runGitHub() to skip installs:
+if (isTRUE(getOption("nifty50.autoinstall", TRUE))) {
+  req_pkgs <- c(
+    "shiny","bslib","quantmod","xts","dplyr","lubridate","plotly","TTR",
+    "memoise","shinycssloaders","scales","purrr","stringr","nser"
+  )
+  to_install <- setdiff(req_pkgs, rownames(installed.packages()))
+  if (length(to_install)) install.packages(to_install, repos = "https://cloud.r-project.org")
+}
 
 # --- 1) Libraries ----------------------------------------------------------
 library(shiny)
